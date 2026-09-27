@@ -1,0 +1,98 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main", "develop" ]
+    paths-ignore: [ "docs/**" ]        # ignorar cambios en docs
+  pull_request:
+    branches: [ "main", "develop" ]
+  workflow_dispatch:                  # permite ejecución manual
+    inputs:
+      environment:
+        description: 'Deploy environment'
+        required: true
+        default: 'staging'
+  schedule:
+    - cron: '0 3 * * *'               # nightly at 03:00 UTC
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: pytest -q
+        # si falla, el job se marcará como failed y siguientes jobs que dependan no se ejecutan
+
+  build:
+    name: Build Docker image
+    runs-on: ubuntu-latest
+    needs: test        # solo corre si `test` tuvo éxito
+    steps:
+      - uses: actions/checkout@v4
+
+      # - name: Login to DockerHub
+      #   uses: docker/login-action@v3
+      #   with:
+      #     username: ${{ secrets.DOCKERHUB_USER }}
+      #     password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # comentado: no tenemos cuenta DockerHub configurada, no hace falta para probar el resto del pipeline
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false               # set true si quieres subir
+          tags: myorg/myapp:${{ github.sha }}
+
+      - name: Generate image info
+        run: echo "myorg/myapp:${{ github.sha }}" > image-info.txt
+        # añadido: el step de abajo necesita este archivo, si no, falla con "No files were found"
+
+      - name: Upload image digest (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-info
+          path: image-info.txt
+        # puedes usar artifacts para depuración o para que otros jobs los usen
+
+  deploy:
+    name: Deploy to environment
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+      # permitimos despliegue manual o automático solo desde main
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy script
+        env:
+          ENV: ${{ github.event.inputs.environment || 'staging' }}
+          SSH_KEY: ${{ secrets.SSH_DEPLOY_KEY }}
+        run: |
+          echo "Deploying to $ENV"
+          # ejemplo: scp/ssh para ejecutar un script de despliegue; aquí va tu lógica
+          # ssh -i $SSH_KEY user@host "docker pull myorg/myapp:${{ github.sha }} && docker-compose up -d"
